@@ -41,7 +41,7 @@ const IMPORTS: { key: ImportKey; title: string; sub: string; spotify: boolean }[
   { key: "medium", title: "Top songs, last 6 months", sub: "Your current rotation", spotify: true },
   { key: "long", title: "Top songs, all time", sub: "Your most played ever", spotify: true },
   { key: "saved", title: "Liked songs", sub: "Latest 50 from your library", spotify: true },
-  { key: "albums", title: "Top albums", sub: "Derived from your all-time top tracks", spotify: true },
+  { key: "albums", title: "Top albums", sub: "Albums you play front to back, plus your saved albums", spotify: true },
   { key: "playlists", title: "From a playlist", sub: "Pick any playlist, filter before adding", spotify: true },
   { key: "random", title: "Random mix", sub: "25 random songs from across your library", spotify: true },
   { key: "demo", title: "Demo library", sub: "26 classics, no Spotify needed", spotify: false },
@@ -147,6 +147,18 @@ function ImportContent() {
     }
   };
 
+  const reroll = async () => {
+    setBusy("random");
+    try {
+      const items = await withGenres(await getRandomMix());
+      setReview({ source: "Random mix", items });
+    } catch (err) {
+      fail(err, "Reroll failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const openPlaylist = async (playlist: PlaylistSummary) => {
     setBusy(playlist.id);
     setError(null);
@@ -214,6 +226,8 @@ function ImportContent() {
             setStatus(message);
           }}
           onCancel={() => setReview(null)}
+          onReroll={review.source === "Random mix" ? reroll : undefined}
+          rerolling={busy === "random"}
         />
       ) : playlists ? (
         <PlaylistPicker
@@ -401,10 +415,14 @@ function ReviewPanel({
   review,
   onDone,
   onCancel,
+  onReroll,
+  rerolling,
 }: {
   review: Review;
   onDone: (message: string) => void;
   onCancel: () => void;
+  onReroll?: () => void;
+  rerolling?: boolean;
 }) {
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const addToQueue = useLibrary((s) => s.addToQueue);
@@ -453,12 +471,23 @@ function ReviewPanel({
     <section className="rounded-3xl border border-line bg-surface p-6">
       <div className="flex items-center justify-between mb-1">
         <h2 className="font-display italic text-2xl">{review.source}</h2>
-        <button
-          onClick={onCancel}
-          className="text-sm text-muted hover:text-ink transition-colors"
-        >
-          Cancel
-        </button>
+        <div className="flex items-center gap-3">
+          {onReroll && (
+            <button
+              onClick={onReroll}
+              disabled={rerolling}
+              className="rounded-full border border-line px-3 py-1 text-sm text-muted hover:text-ink hover:border-muted disabled:opacity-50 transition-colors"
+            >
+              {rerolling ? "Rerolling..." : "Reroll"}
+            </button>
+          )}
+          <button
+            onClick={onCancel}
+            className="text-sm text-muted hover:text-ink transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
       </div>
       <p className="text-sm text-muted mb-5">
         {review.items.length} found. Tap a genre to leave it out, then add the

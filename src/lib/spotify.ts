@@ -201,6 +201,8 @@ interface SpotifyAlbum {
   release_date?: string;
   artists: SpotifyArtistRef[];
   external_urls?: { spotify?: string };
+  total_tracks?: number;
+  album_type?: string;
 }
 
 interface SpotifyTrack {
@@ -265,24 +267,86 @@ export async function getSavedTracks(maxTracks = 50): Promise<MusicItem[]> {
   return items.slice(0, maxTracks);
 }
 
-// Spotify has no top-albums endpoint; derive it from long-term top tracks
-// by grouping on album and sorting by how many top tracks each album has.
-export async function getTopAlbums(range: TopRange = "long_term"): Promise<MusicItem[]> {
-  const data = await apiGet<{ items: SpotifyTrack[] }>(
-    `/me/top/tracks?time_range=${range}&limit=50`
+// Cohesion score for a derived top album: coverage (how much of the
+// tracklist appears in the user's top songs) outweighs raw track count so
+// front-to-back albums beat one-hit heavy rotation, and explicitly saved
+// albums get a boost.
+const ASSUMED_ALBUM_TRACKS = 12;
+
+export function albumCohesionScore(
+  distinctTopTracks: number,
+  totalTracks: number | undefined,
+  saved: boolean
+): number {
+  const total = totalTracks && totalTracks > 0 ? totalTracks : ASSUMED_ALBUM_TRACKS;
+  const coverage = Math.min(1, distinctTopTracks / total);
+  return distinctTopTracks + 4 * coverage + (saved ? 1.5 : 0);
+}
+
+async function getSavedAlbumsRaw(limit = 50): Promise<SpotifyAlbum[]> {
+  const data = await apiGet<{ items: { album: SpotifyAlbum }[] }>(
+    `/me/albums?limit=${limit}`
   );
-  const groups = new Map<string, { album: SpotifyAlbum; count: number; firstSeen: number }>();
-  data.items.forEach((track, index) => {
-    const existing = groups.get(track.album.id);
-    if (existing) {
-      existing.count += 1;
-    } else {
-      groups.set(track.album.id, { album: track.album, count: 1, firstSeen: index });
+  return data.items.map((entry) => entry.album).filter((a) => a?.id);
+}
+
+// Spotify has no top-albums endpoint; derive it from top tracks across all
+// time ranges, keeping only real albums (no singles) that either show
+// multiple distinct tracks in the top lists or are saved in the library.
+export async function getTopAlbums(): Promise<MusicItem[]> {
+  const ranges: TopRange[] = ["long_term", "medium_term", "short_term"];
+  const results = await Promise.allSettled(
+    ranges.map((range) =>
+      apiGet<{ items: SpotifyTrack[] }>(
+        `/me/top/tracks?time_range=${range}&limit=50`
+      )
+    )
+  );
+  const groups = new Map<string, { album: SpotifyAlbum; trackIds: Set<string> }>();
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    for (const track of result.value.items) {
+      const album = track.album;
+      if (!album?.id || album.album_type === "single") continue;
+      const group = groups.get(album.id) ?? { album, trackIds: new Set() };
+      group.trackIds.add(track.id);
+      groups.set(album.id, group);
     }
-  });
-  return [...groups.values()]
-    .sort((a, b) => b.count - a.count || a.firstSeen - b.firstSeen)
-    .map((g) => albumToItem(g.album));
+  }
+  if (groups.size === 0 && results.every((r) => r.status === "rejected")) {
+    throw (results[0] as PromiseRejectedResult).reason;
+  }
+
+  let saved: SpotifyAlbum[] = [];
+  try {
+    saved = await getSavedAlbumsRaw();
+  } catch {
+    // Saved albums are a bonus signal only
+  }
+  const savedIds = new Set(saved.map((a) => a.id));
+
+  const scored = [...groups.values()]
+    .filter((g) => g.trackIds.size >= 2 || savedIds.has(g.album.id))
+    .map((g) => ({
+      album: g.album,
+      score: albumCohesionScore(
+        g.trackIds.size,
+        g.album.total_tracks,
+        savedIds.has(g.album.id)
+      ),
+    }));
+
+  // Saved albums with no top-track presence still count, ranked below the
+  // ones the listening data vouches for.
+  for (const album of saved) {
+    if (!groups.has(album.id) && album.album_type !== "single") {
+      scored.push({ album, score: albumCohesionScore(0, album.total_tracks, true) });
+    }
+  }
+
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .map((entry) => albumToItem(entry.album));
 }
 
 export interface SpotifyProfile {
@@ -357,16 +421,21 @@ export async function getPlaylistTracks(
 const MAX_GENRE_ARTISTS = 30;
 const GENRE_FETCH_CONCURRENCY = 5;
 
+// Session-scoped so repeated imports and random-mix rerolls only fetch
+// artists they have not seen before.
+const artistGenreCache = new Map<string, string[]>();
+
 export async function withGenres(items: MusicItem[]): Promise<MusicItem[]> {
   try {
     const artistIds = [
       ...new Set(items.flatMap((item) => item.artistIds ?? [])),
-    ].slice(0, MAX_GENRE_ARTISTS);
-    if (artistIds.length === 0) return items;
+    ];
+    const missing = artistIds
+      .filter((id) => !artistGenreCache.has(id))
+      .slice(0, MAX_GENRE_ARTISTS);
 
-    const genresByArtist = new Map<string, string[]>();
-    for (let i = 0; i < artistIds.length; i += GENRE_FETCH_CONCURRENCY) {
-      const batch = artistIds.slice(i, i + GENRE_FETCH_CONCURRENCY);
+    for (let i = 0; i < missing.length; i += GENRE_FETCH_CONCURRENCY) {
+      const batch = missing.slice(i, i + GENRE_FETCH_CONCURRENCY);
       const results = await Promise.allSettled(
         batch.map((id) =>
           apiGet<{ id: string; genres?: string[] }>(`/artists/${id}`)
@@ -374,7 +443,7 @@ export async function withGenres(items: MusicItem[]): Promise<MusicItem[]> {
       );
       for (const result of results) {
         if (result.status === "fulfilled") {
-          genresByArtist.set(result.value.id, result.value.genres ?? []);
+          artistGenreCache.set(result.value.id, result.value.genres ?? []);
         }
       }
     }
@@ -382,7 +451,7 @@ export async function withGenres(items: MusicItem[]): Promise<MusicItem[]> {
     return items.map((item) => {
       const genres = [
         ...new Set(
-          (item.artistIds ?? []).flatMap((id) => genresByArtist.get(id) ?? [])
+          (item.artistIds ?? []).flatMap((id) => artistGenreCache.get(id) ?? [])
         ),
       ].slice(0, 5);
       return genres.length > 0 ? { ...item, genres } : item;
@@ -404,8 +473,11 @@ function shuffle<T>(items: T[]): T[] {
 // A random sample from across the listening history the API exposes: top
 // tracks (all ranges), a deep slice of liked songs, and a few randomly
 // chosen playlists. Sources fail independently so one bad endpoint does
-// not empty the pool.
-export async function getRandomMix(count = 25): Promise<MusicItem[]> {
+// not empty the pool. The pool is cached so rerolls are instant.
+const RANDOM_POOL_TTL_MS = 10 * 60 * 1000;
+let randomPool: { items: MusicItem[]; fetchedAt: number } | null = null;
+
+async function buildRandomPool(): Promise<MusicItem[]> {
   const sources = await Promise.allSettled([
     getTopTracks("short_term"),
     getTopTracks("medium_term"),
@@ -432,7 +504,14 @@ export async function getRandomMix(count = 25): Promise<MusicItem[]> {
   }
   const unique = new Map<string, MusicItem>();
   for (const item of pool) unique.set(item.id, item);
-  return shuffle([...unique.values()]).slice(0, count);
+  return [...unique.values()];
+}
+
+export async function getRandomMix(count = 25): Promise<MusicItem[]> {
+  if (!randomPool || Date.now() - randomPool.fetchedAt > RANDOM_POOL_TTL_MS) {
+    randomPool = { items: await buildRandomPool(), fetchedAt: Date.now() };
+  }
+  return shuffle(randomPool.items).slice(0, count);
 }
 
 export async function searchSpotify(
