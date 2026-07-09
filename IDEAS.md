@@ -34,6 +34,11 @@ Parking lot for future features and plans. Move items to "shipped" when done.
 
 ## Infra
 
+- Spotify dev-mode constraints (Feb 2026 API policy): the app owner needs
+  an active Premium subscription, and apps created after Feb 11, 2026 can
+  allowlist at most 5 users. A friends launch beyond 5 people needs the
+  playlist-link import (public data, no login required) or extended quota.
+
 - Deploy to Vercel; add the production callback URL to the Spotify app.
 - Accounts + database (Supabase) once multi-device sync or friend
   comparisons matter; app is localStorage-only until then.

@@ -330,13 +330,19 @@ export async function getPlaylistTracks(
   const items: MusicItem[] = [];
   let offset = 0;
   while (items.length < maxTracks) {
+    // Feb 2026 Web API migration renamed /playlists/{id}/tracks to /items;
+    // handle both `track` and `item` entry shapes across the transition.
     const data = await apiGet<{
-      items: { track: SpotifyTrack | null }[];
+      items: ({
+        track?: SpotifyTrack | null;
+        item?: SpotifyTrack | null;
+      } | null)[];
       next: string | null;
-    }>(`/playlists/${playlistId}/tracks?limit=100&offset=${offset}`);
+    }>(`/playlists/${playlistId}/items?limit=100&offset=${offset}`);
     for (const entry of data.items) {
-      // Local files and podcast episodes come back without a usable track id
-      if (entry.track?.id) items.push(trackToItem(entry.track));
+      const track = entry?.track ?? entry?.item;
+      // Local files and podcast episodes lack a usable track id or album
+      if (track?.id && track.album) items.push(trackToItem(track));
     }
     if (!data.next) break;
     offset += 100;
@@ -344,33 +350,46 @@ export async function getPlaylistTracks(
   return items.slice(0, maxTracks);
 }
 
-// Tracks and albums carry no genres on Spotify; artists do. Batch-fetch the
-// artists behind a set of items and tag each item with its artists' genres.
+// Tracks and albums carry no genres on Spotify; artists do. The Feb 2026
+// migration removed the batch /artists?ids= endpoint for dev-mode apps, so
+// artists are fetched one by one with small concurrency and a cap. Genre
+// tagging is best-effort: it must never fail the import that wraps it.
+const MAX_GENRE_ARTISTS = 30;
+const GENRE_FETCH_CONCURRENCY = 5;
+
 export async function withGenres(items: MusicItem[]): Promise<MusicItem[]> {
-  const artistIds = [
-    ...new Set(items.flatMap((item) => item.artistIds ?? [])),
-  ];
-  if (artistIds.length === 0) return items;
+  try {
+    const artistIds = [
+      ...new Set(items.flatMap((item) => item.artistIds ?? [])),
+    ].slice(0, MAX_GENRE_ARTISTS);
+    if (artistIds.length === 0) return items;
 
-  const genresByArtist = new Map<string, string[]>();
-  for (let i = 0; i < artistIds.length; i += 50) {
-    const batch = artistIds.slice(i, i + 50);
-    const data = await apiGet<{
-      artists: ({ id: string; genres: string[] } | null)[];
-    }>(`/artists?ids=${batch.join(",")}`);
-    for (const artist of data.artists) {
-      if (artist) genresByArtist.set(artist.id, artist.genres);
+    const genresByArtist = new Map<string, string[]>();
+    for (let i = 0; i < artistIds.length; i += GENRE_FETCH_CONCURRENCY) {
+      const batch = artistIds.slice(i, i + GENRE_FETCH_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map((id) =>
+          apiGet<{ id: string; genres?: string[] }>(`/artists/${id}`)
+        )
+      );
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          genresByArtist.set(result.value.id, result.value.genres ?? []);
+        }
+      }
     }
-  }
 
-  return items.map((item) => {
-    const genres = [
-      ...new Set(
-        (item.artistIds ?? []).flatMap((id) => genresByArtist.get(id) ?? [])
-      ),
-    ].slice(0, 5);
-    return genres.length > 0 ? { ...item, genres } : item;
-  });
+    return items.map((item) => {
+      const genres = [
+        ...new Set(
+          (item.artistIds ?? []).flatMap((id) => genresByArtist.get(id) ?? [])
+        ),
+      ].slice(0, 5);
+      return genres.length > 0 ? { ...item, genres } : item;
+    });
+  } catch {
+    return items;
+  }
 }
 
 function shuffle<T>(items: T[]): T[] {
@@ -424,7 +443,7 @@ export async function searchSpotify(
   const data = await apiGet<{
     tracks?: { items: SpotifyTrack[] };
     albums?: { items: SpotifyAlbum[] };
-  }>(`/search?q=${encodeURIComponent(query)}&type=${type}&limit=12`);
+  }>(`/search?q=${encodeURIComponent(query)}&type=${type}&limit=10`);
   if (kind === "song") return (data.tracks?.items ?? []).map(trackToItem);
   return (data.albums?.items ?? []).map(albumToItem);
 }
