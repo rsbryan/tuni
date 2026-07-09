@@ -213,6 +213,15 @@ export default function Home() {
           onNext={rankNext}
         />
       )}
+
+      <footer className="mt-16 border-t border-line pt-6 text-center">
+        <Link
+          href="/privacy"
+          className="text-xs text-muted hover:text-ink transition-colors"
+        >
+          Privacy
+        </Link>
+      </footer>
     </div>
   );
 }
