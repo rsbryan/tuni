@@ -514,6 +514,20 @@ export async function getRandomMix(count = 25): Promise<MusicItem[]> {
   return shuffle(randomPool.items).slice(0, count);
 }
 
+// Random sample of albums the listening data says were played through
+// (the cohesion-scored top albums plus saved albums), cached for rerolls.
+let randomAlbumPool: { items: MusicItem[]; fetchedAt: number } | null = null;
+
+export async function getRandomAlbumMix(count = 15): Promise<MusicItem[]> {
+  if (
+    !randomAlbumPool ||
+    Date.now() - randomAlbumPool.fetchedAt > RANDOM_POOL_TTL_MS
+  ) {
+    randomAlbumPool = { items: await getTopAlbums(), fetchedAt: Date.now() };
+  }
+  return shuffle(randomAlbumPool.items).slice(0, count);
+}
+
 export async function searchSpotify(
   query: string,
   kind: "song" | "album"

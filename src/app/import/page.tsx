@@ -11,6 +11,7 @@ import {
   getPlaylists,
   getPlaylistTracks,
   getProfile,
+  getRandomAlbumMix,
   getRandomMix,
   getSavedTracks,
   grantedScopes,
@@ -34,6 +35,7 @@ type ImportKey =
   | "albums"
   | "playlists"
   | "random"
+  | "randomAlbums"
   | "demo";
 
 const IMPORTS: { key: ImportKey; title: string; sub: string; spotify: boolean }[] = [
@@ -44,6 +46,7 @@ const IMPORTS: { key: ImportKey; title: string; sub: string; spotify: boolean }[
   { key: "albums", title: "Top albums", sub: "Albums you play front to back, plus your saved albums", spotify: true },
   { key: "playlists", title: "From a playlist", sub: "Pick any playlist, filter before adding", spotify: true },
   { key: "random", title: "Random mix", sub: "25 random songs from across your library", spotify: true },
+  { key: "randomAlbums", title: "Random album mix", sub: "Albums you played through, shuffled", spotify: true },
   { key: "demo", title: "Demo library", sub: "26 classics, no Spotify needed", spotify: false },
 ];
 
@@ -134,6 +137,10 @@ function ImportContent() {
           source = "Random mix";
           items = await withGenres(await getRandomMix());
           break;
+        case "randomAlbums":
+          source = "Random album mix";
+          items = await withGenres(await getRandomAlbumMix());
+          break;
         default:
           source = "Demo library";
           items = [...DEMO_SONGS, ...DEMO_ALBUMS];
@@ -148,10 +155,14 @@ function ImportContent() {
   };
 
   const reroll = async () => {
-    setBusy("random");
+    if (!review) return;
+    const isAlbums = review.source === "Random album mix";
+    setBusy(isAlbums ? "randomAlbums" : "random");
     try {
-      const items = await withGenres(await getRandomMix());
-      setReview({ source: "Random mix", items });
+      const items = await withGenres(
+        isAlbums ? await getRandomAlbumMix() : await getRandomMix()
+      );
+      setReview({ source: review.source, items });
     } catch (err) {
       fail(err, "Reroll failed");
     } finally {
@@ -226,8 +237,8 @@ function ImportContent() {
             setStatus(message);
           }}
           onCancel={() => setReview(null)}
-          onReroll={review.source === "Random mix" ? reroll : undefined}
-          rerolling={busy === "random"}
+          onReroll={review.source.startsWith("Random") ? reroll : undefined}
+          rerolling={busy === "random" || busy === "randomAlbums"}
         />
       ) : playlists ? (
         <PlaylistPicker
